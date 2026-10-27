@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+*.pyc
+token.txt
+family_notes.db
+.env
