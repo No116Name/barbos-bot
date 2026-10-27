@@ -79,7 +79,6 @@ async def wake_up(message: types.Message):
     caller_tag = user_tags.get(message.from_user.id) or message.from_user.first_name or "друг"
     await message.answer(
         f"Гав! 🐶 Я тут. Чего изволите, {caller_tag}?",
-        message_thread_id=message.message_thread_id,
         reply_markup=get_main_kb(message.message_thread_id)
     )
 
