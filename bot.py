@@ -76,9 +76,10 @@ def get_list_kb(thread_id):
 @dp.message(F.text.lower().contains(WAKE_WORD))
 async def wake_up(message: types.Message):
     user_states.pop(message.from_user.id, None)
-    caller_tag = user_tags.get(message.from_user.id, message.from_user.first_name)
-    await message.reply(
+    caller_tag = user_tags.get(message.from_user.id) or message.from_user.first_name or "друг"
+    await message.answer(
         f"Гав! 🐶 Я тут. Чего изволите, {caller_tag}?",
+        message_thread_id=message.message_thread_id,
         reply_markup=get_main_kb(message.message_thread_id)
     )
 
@@ -205,7 +206,7 @@ async def handle_text(message: types.Message):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 "INSERT INTO checklists (chat_id, thread_id, item_text, added_by) VALUES (?, ?, ?, ?)",
-                (message.chat.id, thread_id, message.text, user_tags.get(message.from_user.id, message.from_user.first_name))
+                (message.chat.id, thread_id, message.text, user_tags.get(message.from_user.id) or message.from_user.first_name or "друг")
             )
             await db.commit()
         await message.reply(f"✅ Добавил: _{message.text}_", reply_markup=get_main_kb(thread_id))
