@@ -8,8 +8,6 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
 # 📄 Безопасное чтение токена
-# Сначала ищем в переменных окружения (для хостинга),
-# Если нет — читаем из файла token.txt (для локального запуска в Termux)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
     try:
@@ -27,6 +25,7 @@ DB_PATH = "family_notes.db"
 WAKE_WORD = "барбос"
 
 user_tags = {}
+user_states = {} # {user_id: {'action': 'awaiting_text', 'thread_id': 123}}
 
 def get_main_inline_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -41,14 +40,13 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS notes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id INTEGER,
+                thread_id INTEGER,
                 author_tag TEXT,
                 text TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         await db.commit()
-
-user_states = {}
 
 @dp.message(Command("set_tag"))
 async def set_tag(message: types.Message):
@@ -60,7 +58,7 @@ async def set_tag(message: types.Message):
     tag = message.text.replace("/set_tag", "").strip()
     
     if not tag:
-        await message.reply("⚠️ Напиши тег после команды. Например: `/set_tag Красавчик`")
+        await message.reply("⚠️ Напиши тег после команды.")
         return
 
     user_tags[target_user.id] = tag
@@ -71,6 +69,7 @@ async def wake_up(message: types.Message):
     user_states.pop(message.from_user.id, None)
     caller_tag = user_tags.get(message.from_user.id, message.from_user.first_name)
     
+    # Отвечаем в ту же тему, где нас позвали
     await message.reply(
         f"Гав! 🐶 Я тут. Что нужно сделать, {caller_tag}?",
         reply_markup=get_main_inline_kb()
@@ -78,7 +77,14 @@ async def wake_up(message: types.Message):
 
 @dp.callback_query(F.data == "add_note")
 async def cb_add_note(callback: CallbackQuery):
-    user_states[callback.from_user.id] = {'action': 'awaiting_text'}
+    # Запоминаем ID темы, в которой нажали кнопку
+    thread_id = callback.message.message_thread_id
+    
+    user_states[callback.from_user.id] = {
+        'action': 'awaiting_text',
+        'thread_id': thread_id
+    }
+    
     caller_tag = user_tags.get(callback.from_user.id, callback.from_user.first_name)
     await callback.message.edit_text(
         f"Гав! {caller_tag}, напиши текст заметки одним сообщением в чат:",
@@ -88,16 +94,25 @@ async def cb_add_note(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "list_notes")
 async def cb_list_notes(callback: CallbackQuery):
+    thread_id = callback.message.message_thread_id
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT author_tag, text FROM notes WHERE chat_id = ? ORDER BY id DESC", (callback.message.chat.id,)) as cursor:
+        # Ищем заметки только для этой темы (или для всего чата, если темы нет)
+        if thread_id:
+            query = "SELECT author_tag, text FROM notes WHERE chat_id = ? AND thread_id = ? ORDER BY id DESC"
+            params = (callback.message.chat.id, thread_id)
+        else:
+            query = "SELECT author_tag, text FROM notes WHERE chat_id = ? AND thread_id IS NULL ORDER BY id DESC"
+            params = (callback.message.chat.id,)
+
+        async with db.execute(query, params) as cursor:
             notes = await cursor.fetchall()
 
     if not notes:
-        await callback.message.edit_text("📭 Заметок пока нет.", reply_markup=get_main_inline_kb())
+        await callback.message.edit_text("📭 В этой теме заметок пока нет.", reply_markup=get_main_inline_kb())
         await callback.answer()
         return
 
-    response = "📝 **Список заметок:**\n\n"
+    response = "📝 **Заметки в этой теме:**\n\n"
     for note in notes:
         response += f"• {note[1]} _(от {note[0]})_\n\n"
 
@@ -110,10 +125,16 @@ async def cb_list_notes(callback: CallbackQuery):
 @dp.callback_query(F.data == "clear_notes")
 async def cb_clear_notes(callback: CallbackQuery):
     user_states.pop(callback.from_user.id, None)
+    thread_id = callback.message.message_thread_id
+    
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM notes WHERE chat_id = ?", (callback.message.chat.id,))
+        if thread_id:
+            await db.execute("DELETE FROM notes WHERE chat_id = ? AND thread_id = ?", (callback.message.chat.id, thread_id))
+        else:
+            await db.execute("DELETE FROM notes WHERE chat_id = ? AND thread_id IS NULL", (callback.message.chat.id,))
         await db.commit()
-    await callback.message.edit_text("🗑️ Все заметки удалены.", reply_markup=get_main_inline_kb())
+        
+    await callback.message.edit_text("🗑️ Все заметки в этой теме удалены.", reply_markup=get_main_inline_kb())
     await callback.answer()
 
 @dp.message(F.text)
@@ -122,14 +143,15 @@ async def handle_text(message: types.Message):
     
     if state and state.get('action') == 'awaiting_text':
         note_text = message.text
+        thread_id = state.get('thread_id')
         user_states.pop(message.from_user.id, None)
         
         author_tag = user_tags.get(message.from_user.id, message.from_user.first_name)
         
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
-                "INSERT INTO notes (chat_id, author_tag, text) VALUES (?, ?, ?)",
-                (message.chat.id, author_tag, note_text)
+                "INSERT INTO notes (chat_id, thread_id, author_tag, text) VALUES (?, ?, ?, ?)",
+                (message.chat.id, thread_id, author_tag, note_text)
             )
             await db.commit()
         
